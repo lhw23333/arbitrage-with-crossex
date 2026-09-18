@@ -164,9 +164,8 @@ const mockRows = (status: string, over: Record<string, unknown> = {}) =>
 const rebalanceJob = (status: Job['status']): Job => ({
   ...newJob(
     {
-      direction: 'toUsdc',
       route: 'loop',
-      steps: [{ round: 1, kind: 'round', buy: 12, move: 12, arrives: 11.95, borrowLeft: 0, seconds: 130 }],
+      steps: [{ round: 1, kind: 'round', buy: 12, move: 12, arrives: 11.95, borrowLeft: 0, seconds: 130, from: 'CROSSEX', to: 'HYPERLIQUID' }],
       amount: 12,
       costUsd: 0.05,
       target: [],
@@ -252,6 +251,7 @@ describe('GET /api/transfer', () => {
     const { data } = res.json();
     expect(data.spot).toBeNull();
     expect(data.paths.filter((p: { from: string }) => p.from === 'SPOT').map((p: { max: unknown }) => p.max)).toEqual([
+      null,
       null,
       null,
       null,
@@ -500,6 +500,29 @@ describe('POST /api/transfer refusals', () => {
     expect(res.json().error.message).toBe('Transfers wait until the deal ends.');
   });
 
+  it('refuses a Lighter transfer while a rebalance runs, and while a deal is working', async () => {
+    const lighterOut = { coin: 'USDC', from: 'CROSSEX_LIGHTER', to: 'SPOT', amount: '12' };
+    const running = boot();
+    await running.app.ready();
+    running.jobs.write(rebalanceJob('running'));
+    mockReads();
+    const sent = mockSend();
+
+    const duringRun = await running.post(lighterOut);
+
+    expect(duringRun.statusCode).toBe(409);
+    expect(duringRun.json().error.message).toBe('Transfers wait until the rebalance ends.');
+
+    const dealing = boot();
+    createWorkingDeal(dealing.store);
+
+    const duringDeal = await dealing.post({ ...lighterOut, from: 'SPOT', to: 'CROSSEX_LIGHTER' });
+
+    expect(duringDeal.statusCode).toBe(409);
+    expect(duringDeal.json().error.message).toBe('Transfers wait until the deal ends.');
+    expect(sent).toHaveLength(0);
+  });
+
   it('refuses a second transfer', async () => {
     const t = boot();
     await t.app.ready();
@@ -732,7 +755,7 @@ describe('POST /api/transfer sends', () => {
     expect(res.statusCode).toBe(202);
     await waitFor(() => t.transfers.read()?.status !== 'moving', 'the refusal');
     expect(t.file()).toMatchObject({ status: 'failed', failText: HALT_TEXT.marginRefused });
-    expect(t.file().failText).toBe('Gate refused the move: free margin is too low.');
+    expect(t.file().failText).toBe('Gate refused the move: free margin or wallet cash is too low.');
   });
 
   it('a refused spot send names Gate spot, not margin', async () => {
@@ -882,6 +905,12 @@ describe('POST /api/transfer races', () => {
       body: [{ coin: 'USDC', exchange_type: 'HYPERLIQUID', hour_interest_rate: '0.000005', time: String(Date.now()) }],
     });
     mockGateGet('/history_margin_interests', { body: [] });
+    mockGateGet('/positions', {
+      body: [
+        { symbol: 'HYPERLIQUID_FUTURE_ETH_USDC', position_side: 'NONE', position_qty: '-0.1', position_value: '250', mark_price: '2500' },
+        { symbol: 'GATE_FUTURE_ETH_USDT', position_side: 'NONE', position_qty: '0.1', position_value: '250', mark_price: '2500' },
+      ],
+    });
     mockGateGet('/rule/symbols', {
       body: [{ symbol: 'GATE_SPOT_USDC_USDT', exchange_type: 'GATE', business_type: 'SPOT', state: 'live' }],
     });
@@ -893,9 +922,10 @@ describe('POST /api/transfer races', () => {
       .reply(200, [{ currency_pair: 'USDC_USDT', lowest_ask: '1.0001', highest_bid: '0.9999', last: '1' }]);
 
     const results = await Promise.all([
-      t.app.inject({ method: 'POST', url: '/api/rebalance', headers: HOST, payload: { route: 'convert' } }),
+      t.app.inject({ method: 'POST', url: '/api/rebalance', headers: HOST, payload: { route: 'convert', costUsd: 1000 } }),
       t.post({ coin: 'USDT', from: 'CROSSEX', to: 'SPOT', amount: '5' }),
     ]);
+    expect(results.map((r) => r.body).join('\n')).not.toMatch(/out of date|plan changed/i);
 
     expect(results.map((r) => r.statusCode).sort(), results.map((r) => r.body).join('\n')).toEqual([202, 409]);
     const started = [t.jobs.read() !== null, t.transfers.read() !== null];

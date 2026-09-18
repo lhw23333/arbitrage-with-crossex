@@ -1,21 +1,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { classifyGateError, plainErrorFor } from '../core/errors';
-import { floorCents } from '../core/rebalance/plan';
-import type {
-  Direction,
-  GateAccount,
-  PlannedStep,
-  RouteName,
-  TransferCoin,
-  WalletAfter,
-} from '../core/rebalance/plan';
+import { CONVERT_MAX, CONVERT_RATE, floorCents, PAIR_CONVERT_MAX, POOLS, spotArrivalFor } from '../core/rebalance/plan';
+import type { GateAccount, PlannedStep, Pool, RouteName, TransferCoin, Venue, WalletAfter } from '../core/rebalance/plan';
 import { restrictToOwner } from './secretFile';
 
-export type { Direction, RouteName };
+export type { Pool, RouteName };
 export type JobStatus = 'running' | 'halted' | 'done' | 'abandoned';
 export type StepStatus = 'pending' | 'running' | 'done';
-export type FundsAt = 'CROSSEX' | 'GATE' | 'SPOT' | 'HYPERLIQUID';
+export type FundsAt = 'CROSSEX' | 'GATE' | 'SPOT' | 'HYPERLIQUID' | 'LIGHTER';
 
 export interface Step {
   name: string;
@@ -31,6 +24,10 @@ export interface Step {
   planned: number | null;
   arrives: number | null;
   borrowLeft: number | null;
+  from: Pool;
+  to: Pool;
+  cashBefore?: number;
+  sentAt?: number;
 }
 
 export interface Job {
@@ -38,7 +35,6 @@ export interface Job {
   /** Gate user id the job was started on. A resume on another account is
    * refused; null on files written before this field existed. */
   userId: string | null;
-  direction: Direction;
   route: RouteName;
   amount: number;
   costUsd: number | null;
@@ -53,26 +49,55 @@ export interface Job {
   updatedAt: number;
 }
 
-export const TO_USDC_STEPS = ['Buy USDC', 'To spot', 'To Hyperliquid'] as const;
-export const CONVERT_STEPS = ['Convert'] as const;
-export const TO_USDT_STEPS = ['From Hyperliquid', 'To Gate', 'Sell USDC'] as const;
-export type StepName = (typeof TO_USDC_STEPS)[number] | (typeof CONVERT_STEPS)[number] | (typeof TO_USDT_STEPS)[number];
-export const STEP_NAMES: readonly string[] = [...TO_USDC_STEPS, ...CONVERT_STEPS, ...TO_USDT_STEPS];
+export const TO_VENUE_STEP = { HYPERLIQUID: 'To Hyperliquid', LIGHTER: 'To Lighter' } as const;
+export const FROM_VENUE_STEP = { HYPERLIQUID: 'From Hyperliquid', LIGHTER: 'From Lighter' } as const;
+export const TO_USDC_STEPS = ['Buy USDC', 'To spot', TO_VENUE_STEP.HYPERLIQUID] as const;
+export const TO_USDT_STEPS = [FROM_VENUE_STEP.HYPERLIQUID, 'To Gate', 'Sell USDC'] as const;
+export const CONVERT_STEPS = ['Convert', 'Convert to USDT', 'Convert to USDC'] as const;
+export type StepName =
+  | 'Buy USDC'
+  | 'To spot'
+  | 'To Gate'
+  | 'Sell USDC'
+  | (typeof TO_VENUE_STEP)[Venue]
+  | (typeof FROM_VENUE_STEP)[Venue]
+  | (typeof CONVERT_STEPS)[number];
+export const STEP_NAMES: readonly string[] = [
+  'Buy USDC',
+  'To spot',
+  'To Gate',
+  'Sell USDC',
+  ...Object.values(TO_VENUE_STEP),
+  ...Object.values(FROM_VENUE_STEP),
+  ...CONVERT_STEPS,
+];
 
-/** Names before 1.5.1. A job file written by that build must still resume. */
-const LEGACY_DIRECTION: Record<string, Direction> = { payDown: 'toUsdc', pull: 'toUsdt' };
+export function roundStepNames(from: Pool, to: Pool): StepName[] {
+  if (from === 'CROSSEX') return ['Buy USDC', 'To spot', TO_VENUE_STEP[to as Venue]];
+  if (to === 'CROSSEX') return [FROM_VENUE_STEP[from], 'To Gate', 'Sell USDC'];
+  return [FROM_VENUE_STEP[from], TO_VENUE_STEP[to]];
+}
+
+const LEGACY_MOVE: Record<string, { from: Pool; to: Pool }> = {
+  toUsdc: { from: 'CROSSEX', to: 'HYPERLIQUID' },
+  toUsdt: { from: 'HYPERLIQUID', to: 'CROSSEX' },
+  payDown: { from: 'CROSSEX', to: 'HYPERLIQUID' },
+  pull: { from: 'HYPERLIQUID', to: 'CROSSEX' },
+};
 const LEGACY_STEP: Record<string, StepName> = { 'Pull from Hyperliquid': 'From Hyperliquid' };
 
 const JOB_STATUSES: readonly string[] = ['running', 'halted', 'done', 'abandoned'];
-const FUNDS_AT: readonly string[] = ['CROSSEX', 'GATE', 'SPOT', 'HYPERLIQUID'];
+const FUNDS_AT: readonly string[] = ['CROSSEX', 'GATE', 'SPOT', 'HYPERLIQUID', 'LIGHTER'];
 const IN_TRANSIT_STATUSES: readonly JobStatus[] = ['running', 'halted', 'abandoned'];
 const MOVES_TO: Record<string, string> = {
   'To spot': 'Gate spot',
   'From Hyperliquid': 'Gate spot',
+  'From Lighter': 'Gate spot',
   'To Hyperliquid': 'USDC · Hyperliquid',
+  'To Lighter': 'USDC · Lighter',
   'To Gate': 'USDC · Gate',
 };
-const SENDS_WHAT_ARRIVED: readonly string[] = ['To Hyperliquid', 'To Gate'];
+const SENDS_WHAT_ARRIVED: readonly string[] = ['To Hyperliquid', 'To Lighter', 'To Gate'];
 const TRANSFER_STATUSES: readonly string[] = ['moving', 'done', 'failed'];
 
 export const HALT_TEXT = {
@@ -81,10 +106,21 @@ export const HALT_TEXT = {
   cashTooLow: 'Not enough cash for an 11 USDC round.',
   unconfirmed: 'Gate did not confirm the last order. Press Resume to check again.',
   shortBuy: 'The USDC buy filled under 11 USDC.',
-  poorQuote: 'Convert quote was more than 0.3% under market.',
-  marginRefused: 'Gate refused the move: free margin is too low.',
+  poorQuote: 'Convert quote was more than 0.3% under the Gate spot price.',
+  convertTooBig: 'Gate takes at most 500,000 in one Convert. Abandon this rebalance and start a new one.',
+  marginRefused: 'Gate refused the move: free margin or wallet cash is too low.',
   noRecord: 'Gate has no record of this transfer. Try again.',
   timeout: 'Gate took too long on this step. Press Resume to check again.',
+  rateLimited: 'Gate is rate-limiting this account. Nothing was sent. Press Resume in a minute.',
+  quotesUsed:
+    "Gate allows 100 Convert quotes a day, and this account has used them. Nothing was sent. Press Resume later. Gate's count clears within 24 hours.",
+  transferRateLimited: 'Gate is rate-limiting this account. Nothing was sent. Try again in a minute.',
+  nothingFilled: 'Gate closed the order with nothing filled. Nothing moved. Press Resume to try again.',
+  nothingReceived: 'Gate shows this transfer as done, but nothing arrived. Check your Gate wallets.',
+  usdtBelowZero: 'A Convert between Hyperliquid and Lighter needs more USDT · CrossEx cash.',
+  sellStuck: 'Gate did not sell all the USDC in USDC · Gate. Press Resume to sell the rest.',
+  noPrice: 'Could not read the Gate spot price to check the Convert quote. Press Resume to try again.',
+  notListed: 'Gate does not show the last step after 2 min. Press Resume to check again. If Gate still does not show it, Resume sends it again.',
 } as const;
 
 export const LOCK_TEXT = {
@@ -116,7 +152,10 @@ export interface TransferJob {
   updatedAt: number;
 }
 
-export const pendingStep = (name: StepName, plan: Pick<Step, 'round' | 'planned' | 'arrives' | 'borrowLeft'>): Step => ({
+export const pendingStep = (
+  name: StepName,
+  plan: Pick<Step, 'round' | 'planned' | 'arrives' | 'borrowLeft' | 'from' | 'to'>,
+): Step => ({
   name,
   text: null,
   quoteId: null,
@@ -129,28 +168,53 @@ export const pendingStep = (name: StepName, plan: Pick<Step, 'round' | 'planned'
   ...plan,
 });
 
-function stepsFor(direction: Direction, step: PlannedStep): Step[] {
-  if (step.kind === 'convert') {
-    return [pendingStep('Convert', { round: null, planned: step.move, arrives: null, borrowLeft: null })];
-  }
-  const { round } = step;
-  if (direction === 'toUsdt') {
+export function convertSteps(from: Pool, to: Pool, amount: number): Step[] {
+  const move = { from, to, round: null, arrives: null, borrowLeft: null };
+  const crossex = from === 'CROSSEX' || to === 'CROSSEX';
+  const cap = crossex ? CONVERT_MAX : PAIR_CONVERT_MAX;
+  const cents = Math.round(floorCents(amount) * 100);
+  const count = amount > cap ? Math.max(1, Math.ceil(cents / (cap * 100))) : 1;
+  const base = Math.floor(cents / count);
+  const extra = cents - base * count;
+  const chunks = count === 1 ? [amount] : Array.from({ length: count }, (_, index) => (base + (index < extra ? 1 : 0)) / 100);
+  if (crossex) return chunks.map((planned) => pendingStep('Convert', { ...move, planned }));
+  return chunks.flatMap((planned) => [
+    pendingStep('Convert to USDT', { ...move, planned }),
+    pendingStep('Convert to USDC', { ...move, planned: floorCents(planned * (1 - CONVERT_RATE)) }),
+  ]);
+}
+
+function stepsFor(step: PlannedStep): Step[] {
+  const { from, to, round } = step;
+  if (step.kind === 'convert') return convertSteps(from, to, step.move);
+  const figures = { from, to, round, arrives: null, borrowLeft: null };
+  if (from === 'CROSSEX') {
     return [
-      pendingStep('From Hyperliquid', { round, planned: step.move, arrives: null, borrowLeft: null }),
-      pendingStep('To Gate', { round, planned: step.arrives, arrives: null, borrowLeft: null }),
-      pendingStep('Sell USDC', { round, planned: step.arrives, arrives: null, borrowLeft: step.borrowLeft }),
+      pendingStep('Buy USDC', { ...figures, planned: step.buy }),
+      pendingStep('To spot', { ...figures, planned: step.move }),
+      pendingStep(TO_VENUE_STEP[to as Venue], { ...figures, planned: step.move, arrives: step.arrives, borrowLeft: step.borrowLeft }),
+    ];
+  }
+  if (to === 'CROSSEX') {
+    return [
+      pendingStep(FROM_VENUE_STEP[from], { ...figures, planned: step.move }),
+      pendingStep('To Gate', { ...figures, planned: step.arrives }),
+      pendingStep('Sell USDC', { ...figures, planned: step.arrives, borrowLeft: step.borrowLeft }),
     ];
   }
   return [
-    pendingStep('Buy USDC', { round, planned: step.buy, arrives: null, borrowLeft: null }),
-    pendingStep('To spot', { round, planned: step.move, arrives: null, borrowLeft: null }),
-    pendingStep('To Hyperliquid', { round, planned: step.move, arrives: step.arrives, borrowLeft: step.borrowLeft }),
+    pendingStep(FROM_VENUE_STEP[from], { ...figures, planned: step.move }),
+    pendingStep(TO_VENUE_STEP[to], {
+      ...figures,
+      planned: spotArrivalFor(from, step.move),
+      arrives: step.arrives,
+      borrowLeft: step.borrowLeft,
+    }),
   ];
 }
 
 export function newJob(
   input: {
-    direction: Direction;
     route: RouteName;
     steps: PlannedStep[];
     amount: number;
@@ -163,15 +227,14 @@ export function newJob(
   return {
     id: now.toString(36),
     userId: input.userId,
-    direction: input.direction,
     route: input.route,
     amount: input.amount,
     costUsd: input.costUsd,
     target: input.target,
     status: 'running',
     stepIndex: 0,
-    steps: input.steps.flatMap((step) => stepsFor(input.direction, step)),
-    fundsAt: input.direction === 'toUsdt' ? 'HYPERLIQUID' : 'CROSSEX',
+    steps: input.steps.flatMap(stepsFor),
+    fundsAt: input.steps[0]?.from ?? 'CROSSEX',
     haltReason: null,
     tagCount: 0,
     createdAt: now,
@@ -284,12 +347,12 @@ export function moneyLockFor(input: {
 function parseJob(value: unknown): Job | null {
   const job = value as Partial<Job> | null;
   if (typeof job !== 'object' || job === null) return null;
-  if (job.direction === undefined) job.direction = 'toUsdc';
-  if (typeof job.direction === 'string' && job.direction in LEGACY_DIRECTION) job.direction = LEGACY_DIRECTION[job.direction];
+  const { direction = 'toUsdc' } = job as { direction?: unknown };
+  const legacy = Object.hasOwn(LEGACY_MOVE, String(direction)) ? LEGACY_MOVE[String(direction)] : null;
+  delete (job as { direction?: unknown }).direction;
   if (job.userId === undefined) job.userId = null;
   if (job.costUsd === undefined) job.costUsd = null;
   if (job.target === undefined) job.target = null;
-  if (job.direction !== 'toUsdc' && job.direction !== 'toUsdt') return null;
   if (!JOB_STATUSES.includes(String(job.status))) return null;
   if (!Array.isArray(job.steps) || job.steps.length === 0) return null;
   for (const step of job.steps as (Partial<Step> | null)[]) {
@@ -299,6 +362,10 @@ function parseJob(value: unknown): Job | null {
     if (step.planned === undefined) step.planned = job.amount ?? null;
     if (step.arrives === undefined) step.arrives = null;
     if (step.borrowLeft === undefined) step.borrowLeft = null;
+    if (step.cashBefore !== undefined && !Number.isFinite(step.cashBefore)) delete step.cashBefore;
+    if (step.sentAt !== undefined && !Number.isFinite(step.sentAt)) delete step.sentAt;
+    if (step.from === undefined && step.to === undefined && legacy) Object.assign(step, legacy);
+    if (!POOLS.includes(step.from as Pool) || !POOLS.includes(step.to as Pool) || step.from === step.to) return null;
   }
   const index = job.stepIndex;
   if (!Number.isInteger(index) || (index as number) < 0 || (index as number) >= job.steps.length) return null;

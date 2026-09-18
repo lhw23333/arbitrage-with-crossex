@@ -3,6 +3,27 @@
 Only substantial releases are listed here — each one bumps `version.json` (which is what the
 in-app update check compares against).
 
+## 1.6.2 — 2026-09-17
+
+TLDR: Lighter is on CrossEx, and the app trades it. Rebalance splits your equity across USDT,
+Hyperliquid and Lighter, and is safe for large accounts.
+
+- **Lighter pairs in Opportunities.** Up to 50x on ETH and BTC, so a pair needs less capital.
+- **Rebalance splits equity by position size.** Each wallet gets the share its legs hold. The
+  Rebalance window shows each share.
+- **A third wallet: USDC · Lighter.** Rebalance and Manual Transfer move money into and out of
+  it. A Lighter borrow pays about 11% a year from the first dollar.
+- **Balances shows your assets above Rebalance.** Borrow and interest sit under the table, with
+  Rebalance and Manual Transfer. Each opens in its own window. The Borrowing pill adds up every
+  wallet.
+- **Rebalance says when it pays.** It says how many days of saved interest pay the fee. Past 30
+  days, it reads "Not worth it yet".
+- **Rebalance is safe for large accounts.** Big moves split under Gate's caps, and Converts go
+  out 2 s apart. A poor Convert price stops the run. So does a Gate rate limit, and the run
+  says so. A step is never sent twice without you.
+- **Spot loop plans 15 min at most,** and shows only when it costs less than Convert.
+- **A finished run shows what landed,** after fees.
+
 ## 1.6.1 — 2026-09-15
 
 TLDR: One hold now makes your CrossEx USDT and USDC equity even. A new Manual Transfer card moves

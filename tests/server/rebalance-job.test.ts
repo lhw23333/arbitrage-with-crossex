@@ -61,7 +61,12 @@ function boot(over: { store?: Store; job?: unknown; credentials?: AppDeps['crede
   };
 }
 
-function mockView(opts: { accountThen429?: boolean; onAccountRead?: () => void } = {}): void {
+const HEDGED_POSITIONS = [
+  { symbol: 'HYPERLIQUID_FUTURE_ETH_USDC', position_side: 'NONE', position_qty: '-0.1', position_value: '250', mark_price: '2500' },
+  { symbol: 'GATE_FUTURE_ETH_USDT', position_side: 'NONE', position_qty: '0.1', position_value: '250', mark_price: '2500' },
+];
+
+function mockView(opts: { accountThen429?: boolean; onAccountRead?: () => void; positions?: unknown[] } = {}): void {
   if (opts.accountThen429) {
     gate().get(`${API}/crossex/accounts`).query(true).reply(200, accountA);
     gate().persist().get(`${API}/crossex/accounts`).query(true).reply(429, { label: 'TOO_MANY_REQUESTS', message: 'slow down' });
@@ -81,6 +86,7 @@ function mockView(opts: { accountThen429?: boolean; onAccountRead?: () => void }
     .query(true)
     .reply(200, [{ coin: 'USDC', exchange_type: 'HYPERLIQUID', hour_interest_rate: '0.000005', time: String(t) }]);
   gate().persist().get(`${API}/crossex/history_margin_interests`).query(true).reply(200, []);
+  gate().persist().get(`${API}/crossex/positions`).query(true).reply(200, opts.positions ?? HEDGED_POSITIONS);
   gate()
     .persist()
     .get(`${API}/crossex/transfers/coin`)
@@ -116,10 +122,10 @@ const step160 = (name: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-const ONE_ROUND: PlannedStep[] = [{ round: 1, kind: 'round', buy: 300, move: 300, arrives: 299.95, borrowLeft: 0, seconds: 130 }];
+const ONE_ROUND: PlannedStep[] = [{ round: 1, kind: 'round', buy: 300, move: 300, arrives: 299.95, borrowLeft: 0, seconds: 130, from: 'CROSSEX', to: 'HYPERLIQUID' }];
 
 function haltedLoopJob(stepIndex: number, patch: Partial<Step> = {}): Job {
-  const job = newJob({ direction: 'toUsdc', route: 'loop', steps: ONE_ROUND, amount: 300, costUsd: 0.08, target: [], userId: null }, t);
+  const job = newJob({ route: 'loop', steps: ONE_ROUND, amount: 300, costUsd: 0.08, target: [], userId: null }, t);
   job.status = 'halted';
   job.haltReason = HALT_TEXT.restart;
   job.stepIndex = stepIndex;
@@ -146,8 +152,8 @@ async function accountAPlan(): Promise<EvenPlan> {
 }
 
 function roundThreeInSpot(plan: EvenPlan, status: Job['status']): Job {
-  const { steps, costUsd, after } = plan.routes.loop;
-  const job = newJob({ direction: 'toUsdc', route: 'loop', steps, amount: plan.moves, costUsd, target: after, userId: '1' }, t);
+  const { steps, costUsd, after } = plan.routes.loop!;
+  const job = newJob({ route: 'loop', steps, amount: plan.moves, costUsd, target: after, userId: '1' }, t);
   for (const step of job.steps.slice(0, 8)) Object.assign(step, { status: 'done', qty: step.planned, startedAt: t, doneAt: t });
   Object.assign(job.steps[8], { status: 'running', startedAt: t });
   return Object.assign(job, { status, stepIndex: 8, fundsAt: 'SPOT' });
@@ -223,6 +229,44 @@ describe('1.6.0 job files', () => {
       ['To spot', 1, 111.96],
       ['To Hyperliquid', 1, 111.96],
     ]);
+  });
+
+  it.each([
+    [2_448_286.19, 2_448_286.19],
+    [0, 0],
+    [null, undefined],
+    ['12', undefined],
+    [undefined, undefined],
+  ])('a Buy step with cashBefore %o reads back %o', (cashBefore, kept) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'rebalance-job-'));
+    const job = haltedLoopJob(1);
+    const steps = [{ ...job.steps[0], cashBefore }, ...job.steps.slice(1)];
+    writeFileSync(path.join(dir, 'rebalance.json'), JSON.stringify({ ...job, steps }));
+
+    const read = new JobFile(dir).read();
+
+    expect(read?.steps.map((step) => step.name)).toEqual(['Buy USDC', 'To spot', 'To Hyperliquid']);
+    if (kept === undefined) expect(read?.steps[0]).not.toHaveProperty('cashBefore');
+    else expect(read?.steps[0].cashBefore).toBe(kept);
+  });
+
+  it.each([
+    [1_758_000_000_000, 1_758_000_000_000],
+    [0, 0],
+    [null, undefined],
+    ['1758000000000', undefined],
+    [undefined, undefined],
+  ])('a Buy step with sentAt %o reads back %o', (sentAt, kept) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'rebalance-job-'));
+    const job = haltedLoopJob(1);
+    const steps = [{ ...job.steps[0], sentAt }, ...job.steps.slice(1)];
+    writeFileSync(path.join(dir, 'rebalance.json'), JSON.stringify({ ...job, steps }));
+
+    const read = new JobFile(dir).read();
+
+    expect(read?.steps.map((step) => step.name)).toEqual(['Buy USDC', 'To spot', 'To Hyperliquid']);
+    if (kept === undefined) expect(read?.steps[0]).not.toHaveProperty('sentAt');
+    else expect(read?.steps[0].sentAt).toBe(kept);
   });
 
   it('1.6.0 done job reads', async () => {
@@ -343,7 +387,7 @@ describe('halt alerts', () => {
 
   it('boot waits for a step Gate is moving, then halts before the next send', async () => {
     const steps: PlannedStep[] = [ONE_ROUND[0], { ...ONE_ROUND[0], round: 2 }];
-    const job = newJob({ direction: 'toUsdc', route: 'loop', steps, amount: 600, costUsd: 0.16, target: [], userId: null }, t);
+    const job = newJob({ route: 'loop', steps, amount: 600, costUsd: 0.16, target: [], userId: null }, t);
     for (const [index, venueId] of ['o1', 'x1'].entries()) {
       Object.assign(job.steps[index], { text: tagFor(job.id, index + 1), venueId, qty: Number(BOUGHT), status: 'done', startedAt: t, doneAt: t });
     }
@@ -421,13 +465,13 @@ describe('POST /api/rebalance refusals kept from 1.6.0', () => {
   it('answers 409 for a halted job and a working deal, and 403 before the disclaimer', async () => {
     const stored = haltedLoopJob(1, { venueId: 'x1' });
     let h = boot({ job: stored });
-    let res = await h.post('/api/rebalance', { route: 'loop' });
+    let res = await h.post('/api/rebalance', { route: 'loop', costUsd: 1000 });
     expect(res.statusCode).toBe(409);
     expect(res.json().error.message).toBe(`rebalance ${stored.id} is halted`);
 
     await reset();
     h = boot({ store: busyDeal() });
-    res = await h.post('/api/rebalance', { route: 'loop' });
+    res = await h.post('/api/rebalance', { route: 'loop', costUsd: 1000 });
     expect(res.statusCode).toBe(409);
     expect(res.json()).toEqual({
       ok: false,
@@ -437,7 +481,7 @@ describe('POST /api/rebalance refusals kept from 1.6.0', () => {
     await reset();
     const envPath = path.join(mkdtempSync(path.join(tmpdir(), 'disc-')), '.env');
     h = boot({ credentials: { envPath, setClients: () => {} } });
-    res = await h.post('/api/rebalance', { route: 'loop' });
+    res = await h.post('/api/rebalance', { route: 'loop', costUsd: 1000 });
     expect(res.statusCode).toBe(403);
     expect(res.json().error.label).toBe('DISCLAIMER_NOT_ACCEPTED');
   });
@@ -447,7 +491,7 @@ describe('POST /api/rebalance refusals kept from 1.6.0', () => {
     const h = boot();
     expect((await h.view()).ok).toBe(true);
 
-    const res = await h.post('/api/rebalance', { route: 'loop' });
+    const res = await h.post('/api/rebalance', { route: 'loop', costUsd: 1000 });
 
     expect(res.statusCode).toBe(409);
     expect(res.json().error.message).toBe('Gate is rate-limiting the account read. Try again in a few seconds.');
@@ -463,7 +507,7 @@ describe('POST /api/rebalance refusals kept from 1.6.0', () => {
     });
     const h = boot({ store });
 
-    const res = await h.post('/api/rebalance', { route: 'loop' });
+    const res = await h.post('/api/rebalance', { route: 'loop', costUsd: 1000 });
 
     expect(res.statusCode).toBe(409);
     expect(res.json().error.message).toBe('deal deal-409 is still working');
