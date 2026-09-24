@@ -522,7 +522,7 @@ export interface OpportunityCostBreakdown {
 }
 
 /** The MODELLED minimum capital a pair consumes, leg by leg: Boros initial
- * margin from the kIM formula plus perp initial margin at each venue's max
+ * margin from the kIM formula plus perp initial margin at the simulated
  * leverage. Each component is null when an input it needs is missing, and any
  * null nulls the pair's `capitalUsd`. */
 export interface OpportunityCapitalBreakdown {
@@ -530,9 +530,12 @@ export interface OpportunityCapitalBreakdown {
   borosLongImUsd: number | null;
   perpShortImUsd: number | null;
   perpLongImUsd: number | null;
-  /** Max leverage used to size the perp leg's margin; null when unknown. */
+  /** Venue ceilings, not the simulated multipliers. */
   shortLeverageMax: number | null;
   longLeverageMax: number | null;
+  /** Quote-only multipliers after the simulation cap; never used for execution. */
+  shortLeverage?: number | null;
+  longLeverage?: number | null;
 }
 
 export interface OpportunityLeg {
@@ -606,6 +609,8 @@ export interface OpportunityGroup {
  * group-major, so sort stability alone would break a cross-group tie by group
  * rank and float a strictly worse pair to the top. */
 export interface OpportunitiesResult {
+  /** Diagnostics from the same reads used to price these groups. */
+  perpBookDiagnostics?: PerpBookDiagnostic[];
   groups: OpportunityGroup[];
   meta: {
     asOfSec: number;
@@ -613,8 +618,25 @@ export interface OpportunitiesResult {
     borosEntry: BorosEntryMode;
     entryMode: EntryMode;
     exitMode: ExitMode;
+    perpLeverage?: number | null;
   };
   warnings: string[];
+}
+
+export interface PerpBookDiagnostic {
+  symbol: string;
+  venue: string;
+  instrument: string | null;
+  stage: 'metadata' | 'market-lookup' | 'orderbook';
+  endpoint: string;
+  code: 'ok' | 'unsupported-venue' | 'dns' | 'timeout' | 'connection-reset' |
+    'network' | 'http' | 'rate-limited' | 'access-denied' | 'venue-error' |
+    'instrument-unavailable' | 'empty-or-invalid';
+  httpStatus?: number;
+  transportCode?: string;
+  checkedAt: number;
+  elapsedMs: number;
+  timeoutMs: number;
 }
 
 // ---------------------------------------------------------------------------

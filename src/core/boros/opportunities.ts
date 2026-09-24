@@ -24,7 +24,7 @@
  * calls "Fixed APR on capital" (returns.ts `lockedAprOnCapital`), so an
  * opportunity is directly comparable to an open strategy, and it is what pairs
  * and groups rank on. Capital there is live account state; here it is MODELLED
- * (Boros initial margin per leg + perp initial margin at venue max leverage),
+ * (Boros initial margin per leg + perp initial margin at the simulated leverage),
  * so it is the MINIMUM the trade requires — over-collateralizing a Boros
  * account makes the same trade read lower once it is open.
  *
@@ -128,9 +128,12 @@ export interface OpportunityCapitalBreakdown {
   borosLongImUsd: number | null;
   perpShortImUsd: number | null;
   perpLongImUsd: number | null;
-  /** Max leverage used to size the perp leg's margin; null when unknown. */
+  /** Venue leverage ceilings; null when unknown. See short/longLeverage for the simulation. */
   shortLeverageMax: number | null;
   longLeverageMax: number | null;
+  /** Simulated per-leg leverage, not a trading instruction. */
+  shortLeverage: number | null;
+  longLeverage: number | null;
 }
 
 export interface OpportunityPair {
@@ -189,6 +192,7 @@ export interface OpportunitiesResult {
     borosEntry: BorosEntryMode;
     entryMode: EntryMode;
     exitMode: ExitMode;
+    perpLeverage: number | null;
   };
   warnings: string[];
 }
@@ -225,6 +229,8 @@ export interface BuildOpportunitiesInput {
 }
 
 export interface BuildOpportunitiesOptions {
+  /** Quote simulation ONLY. Omitted/null = venue max; otherwise cap each perp leg independently. */
+  perpLeverage?: number | null;
   notionalUsd: number;
   borosEntry: BorosEntryMode;
   entryMode: EntryMode;
@@ -349,8 +355,8 @@ export function borosLiquidationApr(
 }
 
 /**
- * Initial margin one perp leg posts at the venue's max leverage — what
- * `PairTicket` actually opens at. Deliberately EXCLUDES preflight's
+ * Initial margin one perp leg would post at the simulated leverage.
+ * Does not change what `PairTicket` opens at. Deliberately EXCLUDES preflight's
  * `PREFLIGHT_MARGIN_BUFFER` and `TAKER_FEE_RESERVE`: those make preflight a
  * sufficiency check, whereas the capital figure here (like the Positions view's)
  * is raw initial margin. Null when the leverage cap is unknown or non-positive.
@@ -708,7 +714,7 @@ function buildPair(
 
   // --- Capital -------------------------------------------------------------
   // The minimum the trade must post: Boros IM on each fixed leg at the rate it
-  // locks, plus perp IM at each venue's max leverage. Both ways a leg's margin
+  // locks, plus perp IM at the simulated leverage capped by each venue. Both ways a leg's margin
   // can go unknown — no lockable rate, or no margin coefficient — name the
   // market, so every null capital number has a note that explains it.
   const borosIm = (build: MarketRowBuild, execApr: number | null): number | null => {
@@ -745,13 +751,22 @@ function buildPair(
 
   const shortLeverageMax = leverageMaxOf(shortLeg);
   const longLeverageMax = leverageMaxOf(longLeg);
+  const selected = (max: number | null) => max === null ? null : Math.min(max, options.perpLeverage ?? max);
+  const shortLeverage = selected(shortLeverageMax);
+  const longLeverage = selected(longLeverageMax);
+  if (options.perpLeverage != null &&
+      [shortLeverageMax, longLeverageMax].some((max) => max !== null && max < options.perpLeverage!)) {
+    reasons.push(`Requested perp leverage cap ${options.perpLeverage}x is limited by the venue: short ${shortLeverage ?? 'unknown'}x / long ${longLeverage ?? 'unknown'}x.`);
+  }
   const capital: OpportunityCapitalBreakdown = {
     borosShortImUsd: borosIm(a, shortLeg.execApr),
     borosLongImUsd: borosIm(b, longLeg.execApr),
-    perpShortImUsd: perpInitialMarginUsd(notionalUsd, shortLeverageMax),
-    perpLongImUsd: perpInitialMarginUsd(notionalUsd, longLeverageMax),
+    perpShortImUsd: perpInitialMarginUsd(notionalUsd, shortLeverage),
+    perpLongImUsd: perpInitialMarginUsd(notionalUsd, longLeverage),
     shortLeverageMax,
     longLeverageMax,
+    shortLeverage,
+    longLeverage,
   };
   const capitalParts = [
     capital.borosShortImUsd,
@@ -922,6 +937,7 @@ export function buildOpportunities(
       borosEntry: options.borosEntry,
       entryMode: options.entryMode,
       exitMode: options.exitMode,
+      perpLeverage: options.perpLeverage ?? null,
     },
     warnings: [...new Set(warnings)],
   };

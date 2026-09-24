@@ -26,6 +26,9 @@ import {
   type ReactNode,
 } from 'react';
 import { amountError } from '../lib/amount';
+import { useAprLeverage } from '../lib/aprLeverage';
+import { AprLeverageControl } from './AprLeverageControl';
+import { ScanDiagnostics } from './ScanDiagnostics';
 import {
   isValidOpportunityNotional,
   OPPORTUNITY_NOTIONAL_MAX,
@@ -768,7 +771,7 @@ const OpportunityCard = memo(function OpportunityCard({
                   note={
                     pair.capital.shortLeverageMax === null
                       ? ''
-                      : `up to ${pair.capital.shortLeverageMax}× leverage`
+                      : `${pair.capital.shortLeverage ?? pair.capital.shortLeverageMax}× simulated leverage (venue max ${pair.capital.shortLeverageMax}×)`
                   }
                 />
                 <LegRow
@@ -794,7 +797,7 @@ const OpportunityCard = memo(function OpportunityCard({
                   note={
                     pair.capital.longLeverageMax === null
                       ? ''
-                      : `up to ${pair.capital.longLeverageMax}× leverage`
+                      : `${pair.capital.longLeverage ?? pair.capital.longLeverageMax}× simulated leverage (venue max ${pair.capital.longLeverageMax}×)`
                   }
                 />
                 <LegRow
@@ -879,6 +882,7 @@ function RateNote({ midApr, execApr }: { midApr: number; execApr: number | null 
 }
 
 export function OpportunitiesPanel() {
+  const [perpLeverage, setPerpLeverage] = useAprLeverage();
   const [stored] = useState<StoredControls>(() => loadControls());
   const [notionalChoice, setNotionalChoice] = useState<NotionalChoice>(stored.notionalChoice);
   // Always market-at-size. The "at mark rate" alternative priced cards at a
@@ -934,6 +938,7 @@ export function OpportunitiesPanel() {
   const sizeBad = notionalChoice === 'custom' && !isValidOpportunityNotional(Number(sizeStr));
 
   const query = useOpportunities({
+    perpLeverage,
     notionalUsd,
     borosEntry,
     entryMode,
@@ -1055,7 +1060,7 @@ export function OpportunitiesPanel() {
         </span>
         {/* The one and only notional control. It used to be repeated inside
             the advanced panel as a second segmented toggle. */}
-        <span role="radiogroup" aria-label="Notional" className="inline-flex items-center">
+        <span role="radiogroup" aria-label="Notional" className="inline-flex flex-wrap items-center">
           {NOTIONAL_OPTIONS.map((o) => {
             const on = notionalChoice === o.value;
             return (
@@ -1086,6 +1091,7 @@ export function OpportunitiesPanel() {
           </span>
         )}
       </div>
+      <AprLeverageControl value={perpLeverage} onChange={setPerpLeverage} />
       <div className="flex flex-col items-start gap-1.5">
         <div className={microLabelClass}>Perp entry</div>
         <SegmentedToggle<EntryMode>
@@ -1120,6 +1126,12 @@ export function OpportunitiesPanel() {
         />
       </div>
 
+      <p className="basis-full text-xs leading-relaxed text-ink-400" data-testid="apr-simulation-basis">
+        当前卡片测算杠杆上限：{data ? (data.meta.perpLeverage == null ? '平台最高' : `${data.meta.perpLeverage}×`) : '计算中'}。
+        资金年化 APR = 预计净收益 ÷ 估算 Capital × 365 ÷ 剩余天数。
+        Capital 包含两条永续腿与两条 Boros 腿的初始保证金，不含额外安全缓冲；额外投入资金会降低资金年化。
+        此处为情景估算，不是已实现收益；实际下单仍使用原有杠杆逻辑。
+      </p>
         <span className="ml-auto flex items-center gap-2">
           {query.isPlaceholderData && <span className="text-xs text-ink-400">recomputing…</span>}
           <StrategyFreshness
@@ -1165,6 +1177,9 @@ export function OpportunitiesPanel() {
     <div>
       {controls}
       {data && <Notes items={data.warnings} className="mb-2" />}
+      {data && <ScanDiagnostics groups={data.groups} rows={rows} visibleCount={visible.length}
+        diagnostics={data.perpBookDiagnostics} refreshing={query.isFetching}
+        onRetry={() => void query.refetch()} />}
       {/* The bar only exists to narrow a list — with nothing to narrow it would
           be a row of dead chips above an empty state. */}
       {rows.length > 0 && (

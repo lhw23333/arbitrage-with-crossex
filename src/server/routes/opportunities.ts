@@ -31,7 +31,7 @@ import {
 } from '../../core/boros/opportunities';
 import { normalizeVenue } from '../../core/boros/venue';
 import { isSupportedCoin } from '../../core/coins';
-import { BOOK_VENUES, fetchVenueBook, type NormalizedBook } from '../../core/estimate/books';
+import { BOOK_VENUES, fetchVenueBookDiagnostic, type BookReadDiagnostic, type NormalizedBook } from '../../core/estimate/books';
 import {
   feeRowsForTier,
   feeTierLabel,
@@ -55,6 +55,7 @@ const MAX_NOTIONAL_USD = 100_000_000;
 const QUOTE_PREFERENCE = ['USDT', 'USDC', 'USD'];
 
 interface OpportunitiesQuery {
+  perpLeverage?: string;
   notionalUsd?: string;
   borosEntry?: string;
   entryMode?: string;
@@ -184,6 +185,10 @@ export function opportunitiesRoutes(deps: AppDeps) {
     app.get('/opportunities', async (req, reply) => {
       const query = req.query as OpportunitiesQuery;
       const notionalUsd = parseNotionalUsd(query.notionalUsd);
+      const perpLeverage = query.perpLeverage === undefined ? null : Number(query.perpLeverage);
+      if (perpLeverage !== null && (typeof query.perpLeverage !== 'string' || !Number.isInteger(perpLeverage) || perpLeverage < 1 || perpLeverage > 1000)) {
+        throw new CoreError('invalid perpLeverage (expected integer 1–1000, or omit for venue max)', 'validation');
+      }
       const borosEntry = parseMode<BorosEntryMode>(
         query.borosEntry,
         ['mark', 'market'],
@@ -292,6 +297,7 @@ export function opportunitiesRoutes(deps: AppDeps) {
 
       const borosBooks = new Map<number, BorosOrderBook | null>();
       const venueBooks = new Map<string, NormalizedBook | null>();
+      const perpBookDiagnostics: Array<BookReadDiagnostic & { symbol: string }> = [];
       const leverageMaxBySymbol = new Map<string, number>();
       await Promise.all([
         ...(borosEntry === 'market' ? bookMarketIds : []).map(async (marketId) => {
@@ -310,29 +316,31 @@ export function opportunitiesRoutes(deps: AppDeps) {
         // NOT the `books:` key — that one caches a BookTouch for /api/books/:symbol.
         ...[...perpSymbols].map(async (symbol) => {
           const { value } = await deps.cache.get(
-            `fullbook:${symbol}`,
+            `fullbook-diagnostic:${symbol}`,
             TTL.book,
             () => {
               const { exchange, base, quote } = parseSymbol(symbol);
-              return fetchVenueBook(exchange, base, quote);
+              return fetchVenueBookDiagnostic(exchange, base, quote);
             },
             { fresh },
           );
-          venueBooks.set(symbol, value);
+          venueBooks.set(symbol, value.book);
+          perpBookDiagnostics.push({ ...value.diagnostic, symbol });
         }),
         // Fallback keys carry a colon, symbols carry underscores — the cache
         // namespace can't collide with the symbol-keyed entries above.
         ...[...fallbackBooks].map(async (key) => {
           const { value } = await deps.cache.get(
-            `fullbook:${key}`,
+            `fullbook-diagnostic:${key}`,
             TTL.book,
             () => {
               const [venue, base] = key.split(':');
-              return fetchVenueBook(venue, base, fallbackQuote(venue));
+              return fetchVenueBookDiagnostic(venue, base, fallbackQuote(venue));
             },
             { fresh },
           );
-          venueBooks.set(key, value);
+          venueBooks.set(key, value.book);
+          perpBookDiagnostics.push({ ...value.diagnostic, symbol: key });
         }),
         loadLeverageMax(deps, [...perpSymbols], fresh, leverageMaxBySymbol).then((warning) => {
           if (warning !== null) warnings.push(warning);
@@ -351,10 +359,10 @@ export function opportunitiesRoutes(deps: AppDeps) {
           feeRows,
           nowSec,
         },
-        { notionalUsd, borosEntry, entryMode, exitMode, takerFeeOverride },
+        { notionalUsd, borosEntry, entryMode, exitMode, takerFeeOverride, perpLeverage },
       );
       return reply.ok(
-        { ...result, warnings: [...new Set([...warnings, ...result.warnings])] },
+        { ...result, perpBookDiagnostics: perpBookDiagnostics.sort((a, b) => a.symbol.localeCompare(b.symbol)), warnings: [...new Set([...warnings, ...result.warnings])] },
         { stale },
       );
     });

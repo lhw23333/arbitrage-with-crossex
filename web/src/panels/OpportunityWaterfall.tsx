@@ -193,15 +193,15 @@ function buildCapitalSteps(pair: OpportunityPair): WaterfallStep[] {
       'cap-perp-short',
       cap.perpShortImUsd,
       'bg-ink-300/30',
-      `Perp short IM${lev(cap.shortLeverageMax)}`,
-      `Perp initial margin · ${prettyVenue(pair.shortLeg.venue)} (short) — notional over the venue's max leverage${lev(cap.shortLeverageMax)} +${fmtUsd(cap.perpShortImUsd ?? 0)}`,
+      `Perp short IM${lev(cap.shortLeverage ?? cap.shortLeverageMax)}`,
+      `Perp initial margin · ${prettyVenue(pair.shortLeg.venue)} (short) — notional over simulated leverage${lev(cap.shortLeverage ?? cap.shortLeverageMax)} +${fmtUsd(cap.perpShortImUsd ?? 0)}`,
     ],
     [
       'cap-perp-long',
       cap.perpLongImUsd,
       'bg-ink-300/30',
-      `Perp long IM${lev(cap.longLeverageMax)}`,
-      `Perp initial margin · ${prettyVenue(pair.longLeg.venue)} (long) — notional over the venue's max leverage${lev(cap.longLeverageMax)} +${fmtUsd(cap.perpLongImUsd ?? 0)}`,
+      `Perp long IM${lev(cap.longLeverage ?? cap.longLeverageMax)}`,
+      `Perp initial margin · ${prettyVenue(pair.longLeg.venue)} (long) — notional over simulated leverage${lev(cap.longLeverage ?? cap.longLeverageMax)} +${fmtUsd(cap.perpLongImUsd ?? 0)}`,
     ],
   ];
 

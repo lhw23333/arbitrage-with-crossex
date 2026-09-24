@@ -3,6 +3,7 @@
  * cohort lives in test/fixtures; degraded variants are spelled per case. */
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import type { OpportunityLeg, OpportunityPair, SymbolRule } from '../api/types';
 import {
@@ -18,7 +19,8 @@ import {
   OPP_NT,
   symbolHandlers,
 } from '../test/fixtures';
-import { server } from '../test/server';
+import { env, server } from '../test/server';
+import { APR_LEVERAGE_STORAGE_KEY } from '../lib/aprLeverage';
 import { renderWithClient } from '../test/utils';
 import { useTradeFlow } from '../trade/TradeFlow';
 import { OPPORTUNITIES_STORAGE_KEY, OpportunitiesPanel } from './OpportunitiesPanel';
@@ -846,6 +848,51 @@ function WizardProbe() {
 }
 
 describe('OpportunitiesPanel → wizard intent', () => {
+  it('persists the APR simulation, refreshes its quote, and never passes leverage to execution', async () => {
+    const urls: string[] = [];
+    const mutations: string[] = [];
+    server.use(
+      ...baseHandlers(),
+      http.post('*', ({ request }) => { mutations.push(request.url); return HttpResponse.json({}); }),
+      http.get('/api/opportunities', ({ request }) => {
+        urls.push(request.url);
+        const cap = new URL(request.url).searchParams.get('perpLeverage');
+        const data = makeOpportunitiesResult();
+        data.meta.perpLeverage = cap ? Number(cap) : null;
+        if (cap) {
+          const pair = data.groups[0].pairs[0];
+          pair.capital.shortLeverage = 5;
+          pair.capital.longLeverage = 5;
+          pair.capital.perpShortImUsd = 2000;
+          pair.capital.perpLongImUsd = 2000;
+          pair.capitalUsd = 4000 + pair.capital.borosShortImUsd! + pair.capital.borosLongImUsd!;
+          pair.netFixedAprOnCapital = pair.estProfitUsd! / pair.capitalUsd / (pair.secondsToMaturity / (365 * 86400));
+          data.groups[0].bestPair = pair;
+        }
+        return HttpResponse.json(env(data));
+      }),
+    );
+    wizardSeen.length = 0;
+    const mounted = renderWithClient(<><OpportunitiesPanel /><WizardProbe /></>);
+    await waitFor(() => expect(toggles()).toHaveLength(1));
+    await userEvent.selectOptions(screen.getByLabelText('APR 测算杠杆'), '5');
+    await waitFor(() => expect(paramsOf(urls.at(-1)!).perpLeverage).toBe('5'));
+    await waitFor(() => expect(screen.getByTestId('apr-simulation-basis')).toHaveTextContent('当前卡片测算杠杆上限：5×'));
+    expect(localStorage.getItem(APR_LEVERAGE_STORAGE_KEY)).toBe('5');
+    await userEvent.click(toggles()[0]);
+    expect(screen.getByText('5× simulated leverage (venue max 10×)')).toBeInTheDocument();
+    await userEvent.click(executeButtons()[0]);
+    await waitFor(() => expect(wizardSeen).toHaveLength(1));
+    expect(wizardSeen[0]).not.toHaveProperty('perpLeverage');
+    expect(wizardSeen[0]).not.toHaveProperty('leverage');
+    expect(mutations).toEqual([]);
+    mounted.unmount();
+    renderWithClient(<OpportunitiesPanel />);
+    expect(screen.getByLabelText('APR 测算杠杆')).toHaveValue('5');
+    await userEvent.selectOptions(screen.getByLabelText('APR 测算杠杆'), 'max');
+    await waitFor(() => expect(paramsOf(urls.at(-1)!).perpLeverage).toBeUndefined());
+  });
+
   it('opens the wizard with BOTH Boros legs at the card\'s own maturity', async () => {
     // Regression heritage (from the old direct-prefill contract): the maturity
     // must travel, or a venue+base match takes whichever expiry comes first —

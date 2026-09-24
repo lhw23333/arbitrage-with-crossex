@@ -132,6 +132,57 @@ afterEach(async () => {
 });
 
 describe('GET /api/opportunities', () => {
+  it('returns source-specific failure diagnostics with the same unpriced scan, cached together', async () => {
+    app = makeTestApp({ borosFetch: borosStub(borosBodies()) });
+    mockGate();
+    nock('https://api.hyperliquid.xyz').post('/info').reply(200, { levels: [[{ px: '1899', sz: '5000' }], [{ px: '1901', sz: '5000' }]] });
+    nock('https://fapi.binance.com').get('/fapi/v1/depth').query(true).reply(403, { message: 'access denied' });
+    const res = await app.inject({ method: 'GET', url: '/api/opportunities', headers: HOST });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(data.groups[0].pairs[0].netFixedAprOnCapital).toBeNull();
+    expect(data.perpBookDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ symbol: 'BINANCE_FUTURE_ETH_USDT', code: 'access-denied', httpStatus: 403 }),
+      expect.objectContaining({ symbol: 'HYPERLIQUID_FUTURE_ETH_USDC', code: 'ok' }),
+    ]));
+    const again = await app.inject({ method: 'GET', url: '/api/opportunities', headers: HOST });
+    expect(again.json().data.perpBookDiagnostics).toEqual(data.perpBookDiagnostics);
+  });
+
+  it.each(['0', '-1', '1.5', '1001', 'NaN', 'Infinity', '', 'abc', '5&perpLeverage=10'])(
+    'rejects invalid perpLeverage=%s before loading markets', async (value) => {
+      app = makeTestApp();
+      const res = await app.inject({ method: 'GET', url: `/api/opportunities?perpLeverage=${value}`, headers: HOST });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.message).toContain('perpLeverage');
+    },
+  );
+
+  it('recomputes capital and APR at the requested leverage without reusing the previous quote', async () => {
+    // Hold the valuation instant constant: under a full-suite load the two
+    // requests can cross a second, changing remaining carry independently of leverage.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(NOW * 1000);
+    try {
+    app = makeTestApp({ borosFetch: borosStub(borosBodies()) });
+    mockGate();
+    mockVenueBooks();
+    const quote = async (suffix: string) => (await app!.inject({ method: 'GET', url: `/api/opportunities${suffix}`, headers: HOST })).json().data;
+    const before = await quote('');
+    const after = await quote('?perpLeverage=5');
+    const pair = after.groups[0].bestPair;
+    const old = before.groups[0].bestPair;
+    expect(after.meta.perpLeverage).toBe(5);
+    expect(pair.capital).toMatchObject({ shortLeverage: 5, longLeverage: 5, perpShortImUsd: 2000, perpLongImUsd: 2000 });
+    expect(pair.estProfitUsd).toBe(old.estProfitUsd);
+    expect(pair.capitalUsd).toBeGreaterThan(old.capitalUsd);
+    // Loss-making quotes move towards zero too; the formula, not the sign,
+    // is what must stay consistent as the capital denominator changes.
+    expect(pair.netFixedAprOnCapital).toBeCloseTo(old.netFixedAprOnCapital * old.capitalUsd / pair.capitalUsd, 10);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('prices the arb group end to end and echoes the request params in meta', async () => {
     app = makeTestApp({ borosFetch: borosStub(borosBodies()) });
     mockGate();

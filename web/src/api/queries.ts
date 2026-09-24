@@ -74,8 +74,13 @@ export const qk = {
     ['assetView', address, since, legSince] as const,
   borosAgent: ['boros', 'agent'] as const,
   borosPairContext: (address: string) => ['boros', 'pair', 'context', address] as const,
-  opportunities: (notionalUsd: number, borosEntry: BorosEntryMode, entryMode: EntryMode, exitMode: ExitMode) =>
-    ['opportunities', notionalUsd, borosEntry, entryMode, exitMode] as const,
+  opportunities: (
+    notionalUsd: number,
+    borosEntry: BorosEntryMode,
+    entryMode: EntryMode,
+    exitMode: ExitMode,
+    perpLeverage?: number | null,
+  ) => ['opportunities', notionalUsd, borosEntry, entryMode, exitMode, perpLeverage ?? 'max'] as const,
   deal: (id: string) => ['deal', id] as const,
   activeDeals: ['deals', 'active'] as const,
   alerts: ['alerts'] as const,
@@ -216,6 +221,8 @@ export function useAssetViewWindows(
 }
 
 export interface OpportunitiesParams {
+  /** APR simulation only; never sent to a trading endpoint. */
+  perpLeverage?: number | null;
   notionalUsd: number;
   borosEntry: BorosEntryMode;
   entryMode: EntryMode;
@@ -250,10 +257,12 @@ export function isValidOpportunityNotional(notionalUsd: number): boolean {
  * `isPlaceholderData` to dim them). */
 export function useOpportunities(p: OpportunitiesParams) {
   const search =
-    `?notionalUsd=${p.notionalUsd}&borosEntry=${p.borosEntry}` + `&entryMode=${p.entryMode}&exitMode=${p.exitMode}`;
+    `?notionalUsd=${p.notionalUsd}&borosEntry=${p.borosEntry}` +
+    `&entryMode=${p.entryMode}&exitMode=${p.exitMode}` +
+    (p.perpLeverage != null ? `&perpLeverage=${p.perpLeverage}` : '');
   const shown = useTabActive();
   return useQuery({
-    queryKey: qk.opportunities(p.notionalUsd, p.borosEntry, p.entryMode, p.exitMode),
+    queryKey: qk.opportunities(p.notionalUsd, p.borosEntry, p.entryMode, p.exitMode, p.perpLeverage),
     queryFn: () => fetchJson<OpportunitiesResult>(`/opportunities${search}`),
     enabled: (query) => isValidOpportunityNotional(p.notionalUsd) && canFetch(shown, query),
     refetchInterval: shown ? 12_000 : false,

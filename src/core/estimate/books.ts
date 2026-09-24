@@ -233,13 +233,57 @@ export const BOOK_VENUES: ReadonlySet<string> = new Set(Object.keys(BOOK_SOURCES
 const sizeMultCache = new Map<string, number>();
 const marketIdCache = new Map<string, string>();
 
+export type BookReadCode = 'ok' | 'unsupported-venue' | 'dns' | 'timeout' |
+  'connection-reset' | 'network' | 'http' | 'rate-limited' | 'access-denied' |
+  'venue-error' | 'instrument-unavailable' | 'empty-or-invalid';
+
+/** Public market-data diagnostics only: never expose raw Axios errors, headers,
+ * request config or upstream response bodies (which can contain proxy secrets). */
+export interface BookReadDiagnostic {
+  venue: string;
+  instrument: string | null;
+  stage: 'metadata' | 'market-lookup' | 'orderbook';
+  endpoint: string;
+  code: BookReadCode;
+  httpStatus?: number;
+  transportCode?: string;
+  checkedAt: number;
+  elapsedMs: number;
+  timeoutMs: number;
+}
+
+export interface BookReadResult {
+  book: NormalizedBook | null;
+  diagnostic: BookReadDiagnostic;
+}
+
 /**
  * Fetch + normalize a venue's public book. Unknown venue (e.g. DERIBIT), HTTP error,
  * missing instrument, or an unparseable/empty book all return null — NEVER throws.
  */
 export async function fetchVenueBook(exchange: string, base: string, quote: string): Promise<NormalizedBook | null> {
+  return (await fetchVenueBookDiagnostic(exchange, base, quote)).book;
+}
+
+/** Same read and timeout as the trading estimator, with an explicit failure
+ * category for the scanner. Failed reads remain null; no stale quote substitution. */
+export async function fetchVenueBookDiagnostic(exchange: string, base: string, quote: string): Promise<BookReadResult> {
+  const started = Date.now();
+  const diagnostic: BookReadDiagnostic = {
+    venue: exchange.toUpperCase(), instrument: nativeSymbol(exchange, base, quote),
+    stage: 'orderbook', endpoint: '', code: 'ok', checkedAt: started, elapsedMs: 0, timeoutMs: TIMEOUT_MS,
+  };
+  const finish = (code: BookReadCode, book: NormalizedBook | null = null): BookReadResult => ({
+    book, diagnostic: { ...diagnostic, code, checkedAt: Date.now(), elapsedMs: Date.now() - started },
+  });
+  const venueError = (data: unknown) => {
+    if (!data || typeof data !== 'object') return false;
+    const row = data as { code?: unknown; retCode?: unknown };
+    const code = row.retCode ?? row.code;
+    return code != null && String(code) !== '0' && String(code) !== '200';
+  };
   const src = BOOK_SOURCES[exchange.toUpperCase()];
-  if (!src) return null;
+  if (!src) return finish('unsupported-venue');
   try {
     let sizeMult = 1;
     if (src.meta) {
@@ -248,10 +292,14 @@ export async function fetchVenueBook(exchange: string, base: string, quote: stri
       if (cached != null) {
         sizeMult = cached;
       } else {
-        const { data } = await axios.get(src.meta.url(base, quote), { timeout: TIMEOUT_MS });
+        diagnostic.stage = 'metadata';
+        diagnostic.endpoint = src.meta.url(base, quote);
+        const { data, status } = await axios.get(diagnostic.endpoint, { timeout: TIMEOUT_MS });
+        diagnostic.httpStatus = status;
+        if (venueError(data)) return finish('venue-error');
         const m = src.meta.extract(data);
         // Without the multiplier the sizes would be off by orders of magnitude — bail.
-        if (m == null) return null;
+        if (m == null) return finish('instrument-unavailable');
         sizeMultCache.set(key, m);
         sizeMult = m;
       }
@@ -261,19 +309,45 @@ export async function fetchVenueBook(exchange: string, base: string, quote: stri
       const key = `${exchange.toUpperCase()}:${base}`;
       marketId = marketIdCache.get(key) ?? null;
       if (marketId === null) {
-        const { data } = await axios.get(src.market.url, { timeout: TIMEOUT_MS });
+        diagnostic.stage = 'market-lookup';
+        diagnostic.endpoint = src.market.url;
+        const { data, status } = await axios.get(diagnostic.endpoint, { timeout: TIMEOUT_MS });
+        diagnostic.httpStatus = status;
+        if (venueError(data)) return finish('venue-error');
         marketId = src.market.extract(data, base);
-        if (marketId === null) return null;
+        if (marketId === null) return finish('instrument-unavailable');
         marketIdCache.set(key, marketId);
       }
     }
     const url = src.url(base, quote, marketId);
-    const { data } =
+    diagnostic.stage = 'orderbook';
+    diagnostic.endpoint = url;
+    delete diagnostic.httpStatus;
+    const { data, status } =
       src.method === 'POST'
         ? await axios.post(url, src.body?.(base, quote), { timeout: TIMEOUT_MS })
         : await axios.get(url, { timeout: TIMEOUT_MS });
-    return src.parse(data, sizeMult);
-  } catch {
-    return null;
+    diagnostic.httpStatus = status;
+    if (venueError(data)) return finish('venue-error');
+    try {
+      const book = src.parse(data, sizeMult);
+      return finish(book ? 'ok' : 'empty-or-invalid', book);
+    } catch {
+      return finish('empty-or-invalid');
+    }
+  } catch (error) {
+    const err = (error && typeof error === 'object' ? error : {}) as { code?: string; response?: { status?: number } };
+    const status = err.response?.status;
+    // Reset any successful metadata status before reporting a later network failure.
+    delete diagnostic.httpStatus;
+    if (typeof status === 'number') diagnostic.httpStatus = status;
+    if (typeof err.code === 'string' && /^[A-Z0-9_]{1,40}$/.test(err.code)) diagnostic.transportCode = err.code;
+    if (status === 429 || status === 418) return finish('rate-limited');
+    if (status === 401 || status === 403 || status === 451) return finish('access-denied');
+    if (status) return finish('http');
+    if (['ENOTFOUND', 'EAI_AGAIN', 'ENOENT'].includes(err.code ?? '')) return finish('dns');
+    if (['ECONNABORTED', 'ETIMEDOUT'].includes(err.code ?? '')) return finish('timeout');
+    if (err.code === 'ECONNRESET') return finish('connection-reset');
+    return finish('network');
   }
 }

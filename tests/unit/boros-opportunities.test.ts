@@ -996,6 +996,35 @@ describe('buildOpportunities — ranking keys on the capital basis', () => {
 });
 
 describe('buildOpportunities — meta', () => {
+  it('applies the leverage cap to both perp margins and capital APR, not profit or Boros IM', () => {
+    const base = buildOpportunities(input(), opts()).groups[0].bestPair!;
+    const out = buildOpportunities(input(), opts({ perpLeverage: 5 }));
+    const pair = out.groups[0].bestPair!;
+    expect(out.meta.perpLeverage).toBe(5);
+    expect(pair.capital.shortLeverage).toBe(5);
+    expect(pair.capital.longLeverage).toBe(5);
+    expect(pair.capital.perpShortImUsd).toBe(N / 5);
+    expect(pair.capital.perpLongImUsd).toBe(N / 5);
+    expect(pair.capital.borosShortImUsd).toBe(base.capital.borosShortImUsd);
+    expect(pair.capital.borosLongImUsd).toBe(base.capital.borosLongImUsd);
+    expect(pair.estProfitUsd).toBe(base.estProfitUsd);
+    expect(pair.capitalUsd).toBeGreaterThan(base.capitalUsd!);
+    expect(pair.netFixedAprOnCapital).toBeCloseTo(pair.estProfitUsd! / (pair.capitalUsd! * T), 10);
+    expect(pair.effectiveLeverage).toBeCloseTo(N / pair.capitalUsd!, 10);
+  });
+
+  it('caps each leg independently and never invents a missing venue cap', () => {
+    const limited = input({ leverageMaxBySymbol: new Map([[HL_SYMBOL, 3], [BN_SYMBOL, 25]]) });
+    const pair = buildOpportunities(limited, opts({ perpLeverage: 5 })).groups[0].bestPair!;
+    expect(pair.capital.shortLeverage).toBe(3);
+    expect(pair.capital.longLeverage).toBe(5);
+    expect(pair.capital.perpShortImUsd).toBeCloseTo(N / 3);
+    expect(pair.reasons.join(' ')).toContain('limited by the venue');
+    const unknown = buildOpportunities(input({ leverageMaxBySymbol: new Map() }), opts({ perpLeverage: 5 })).groups[0].pairs[0];
+    expect(unknown.capitalUsd).toBeNull();
+    expect(unknown.netFixedAprOnCapital).toBeNull();
+  });
+
   it('echoes the clock and the chosen assumptions', () => {
     const out = buildOpportunities(input(), opts({ entryMode: 'maker-hedge', exitMode: 'roll' }));
     expect(out.meta).toEqual({
@@ -1004,6 +1033,7 @@ describe('buildOpportunities — meta', () => {
       borosEntry: 'market',
       entryMode: 'maker-hedge',
       exitMode: 'roll',
+      perpLeverage: null,
     });
   });
 });

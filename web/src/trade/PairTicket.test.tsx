@@ -225,6 +225,8 @@ describe('PairTicket execution modes', () => {
   });
 
   it('leverage is PER LEG at each venue max (never min of the two, no input)', async () => {
+    // The APR-only simulator must never influence this execution path.
+    localStorage.setItem('crossex.apr-simulation-leverage.v1', '5');
     const calls: ActionInput[][] = [];
     // Asymmetric caps: GATE max 10x, OKX max 50x (like HL 5x vs Bybit 20x live).
     server.use(
