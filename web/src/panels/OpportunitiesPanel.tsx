@@ -13,6 +13,7 @@
  * drive. Executing only PREFILLS the pair ticket — submission stays behind its
  * hold-to-confirm control.
  */
+import { ArrowRight, ArrowUpRight } from 'lucide-react';
 import {
   memo,
   useCallback,
@@ -29,11 +30,9 @@ import {
   isValidOpportunityNotional,
   OPPORTUNITY_NOTIONAL_MAX,
   OPPORTUNITY_NOTIONAL_MIN,
-  OPPORTUNITY_FEE_TIERS,
   useBorosPairContext,
   useOpportunities,
   usePositions,
-  type OpportunityFeeTier,
 } from '../api/queries';
 import type {
   BorosEntryMode,
@@ -131,8 +130,6 @@ export interface StoredControls {
   borosEntry: BorosEntryMode;
   entryMode: EntryMode;
   exitMode: ExitMode;
-  /** Simulated Gate CrossEx VIP fee tier — only sent while unconfigured. */
-  feeTier: OpportunityFeeTier;
 }
 
 const DEFAULTS: StoredControls = {
@@ -143,22 +140,13 @@ const DEFAULTS: StoredControls = {
   // 'roll' by default: an assumed exit cost is a decision the user has not
   // made yet, and it understates every quote.
   exitMode: 'roll',
-  feeTier: 'vip0',
 };
-
-/** 'vip3' → 'VIP 3'. */
-const feeTierLabel = (t: OpportunityFeeTier) => `VIP ${t.slice(3)}`;
 
 const validEntryMode = (v: unknown): EntryMode =>
   v === 'both-market' || v === 'maker-hedge' ? v : DEFAULTS.entryMode;
 
 const validExitMode = (v: unknown): ExitMode =>
   v === 'close' || v === 'roll' ? v : DEFAULTS.exitMode;
-
-const validFeeTier = (v: unknown): OpportunityFeeTier =>
-  (OPPORTUNITY_FEE_TIERS as readonly unknown[]).includes(v)
-    ? (v as OpportunityFeeTier)
-    : DEFAULTS.feeTier;
 
 const validSize = (v: unknown): number =>
   typeof v === 'number' && isValidOpportunityNotional(v) ? v : DEFAULTS.customNotionalUsd;
@@ -174,7 +162,7 @@ function migrateLegacy(): StoredControls | null {
   const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
   if (raw === null) return null;
   const p = JSON.parse(raw) as
-    | { choice?: unknown; customSize?: unknown; entryMode?: unknown; exitMode?: unknown; feeTier?: unknown }
+    | { choice?: unknown; customSize?: unknown; entryMode?: unknown; exitMode?: unknown }
     | null;
   const size = validSize(p?.customSize);
   const choice = p?.choice;
@@ -194,7 +182,6 @@ function migrateLegacy(): StoredControls | null {
     borosEntry: 'market',
     entryMode: validEntryMode(p?.entryMode),
     exitMode: validExitMode(p?.exitMode),
-    feeTier: validFeeTier(p?.feeTier),
   };
 }
 
@@ -220,7 +207,6 @@ export function loadControls(base: StoredControls = DEFAULTS): StoredControls {
           borosEntry?: unknown;
           entryMode?: unknown;
           exitMode?: unknown;
-          feeTier?: unknown;
         }
       | null;
     return {
@@ -238,7 +224,6 @@ export function loadControls(base: StoredControls = DEFAULTS): StoredControls {
           ? p.entryMode
           : base.entryMode,
       exitMode: p?.exitMode === 'close' || p?.exitMode === 'roll' ? p.exitMode : base.exitMode,
-      feeTier: validFeeTier(p?.feeTier),
     };
   });
 }
@@ -310,8 +295,8 @@ function cardChips(pair: OpportunityPair): CardChip[] {
     if (!leg.crossexSymbol) {
       chips.push({
         key: `sym:${side}`,
-        label: `no CX symbol · ${leg.venue}`,
-        title: `${leg.venue} lists no CrossEx perp for ${leg.base} — that leg won't prefill`,
+        label: `no CX symbol · ${prettyVenue(leg.venue)}`,
+        title: `${prettyVenue(leg.venue)} lists no CrossEx perp for ${leg.base} — that leg won't prefill`,
       });
     }
   }
@@ -358,7 +343,7 @@ function LegRow({
       }`}
     >
       {kind}
-      {href && <span aria-hidden="true"> ↗</span>}
+      {href && <ArrowUpRight size={12} aria-hidden className="ml-0.5 inline" />}
     </span>
   );
   return (
@@ -446,7 +431,6 @@ const OpportunityCard = memo(function OpportunityCard({
   pair: served,
   notionalUsd,
   onOpenStrategy,
-  unconfigured,
   held = null,
 }: {
   /** Set when this row is a later maturity of a hedge the reader runs: the
@@ -467,9 +451,6 @@ const OpportunityCard = memo(function OpportunityCard({
   onOpenStrategy:
     | ((pair: OpportunityPair, maturitySec: number, sizeBase?: number) => void)
     | null;
-  /** First-run view: symbols are expectedly absent, so the CTA stays enabled
-   * and clicking it nudges the setup guide instead of dead-ending. */
-  unconfigured: boolean;
 }) {
   const [open, setOpen] = useState(false);
   /**
@@ -518,14 +499,12 @@ const OpportunityCard = memo(function OpportunityCard({
   // different assets, and the ticket only takes one base.
   const basesDiffer = pair.shortLeg.base !== pair.longLeg.base;
   const noSymbols = !pair.shortLeg.crossexSymbol && !pair.longLeg.crossexSymbol;
-  const executeDisabled = (noSymbols && !unconfigured) || basesDiffer || onOpenStrategy === null;
+  const executeDisabled = noSymbols || basesDiffer || onOpenStrategy === null;
   const executeTitle = basesDiffer
     ? `The legs trade different assets (${pair.shortLeg.base} vs ${pair.longLeg.base}) — the pair ticket takes one base`
-    : unconfigured
-      ? 'Add your Gate API key in the setup guide on the right — clicking walks you through the legs'
-      : noSymbols
-        ? `Neither ${pair.shortLeg.venue} nor ${pair.longLeg.venue} lists a CrossEx perp for ${pair.base}`
-        : 'Opens this strategy step by step — lock the Boros rate first, then hedge with the perps. You confirm each order yourself.';
+    : noSymbols
+      ? `Neither ${prettyVenue(pair.shortLeg.venue)} nor ${prettyVenue(pair.longLeg.venue)} lists a CrossEx perp for ${pair.base}`
+      : 'Opens this strategy step by step — lock the Boros rate first, then hedge with the perps. You confirm each order yourself.';
   const detailsDisabled =
     !canChartProfit(pair) && !canChartCapital(pair) && pair.execSpreadApr === null;
   const detailsTitle = detailsDisabled
@@ -690,8 +669,8 @@ const OpportunityCard = memo(function OpportunityCard({
               </span>
             </Stat>
             {/* The net story needs fees/books/leverage; when those are missing
-                (Gate down or unconfigured) the raw Boros spread is still the
-                headline worth showing — it is what the trade captures. */}
+                (Gate down) the raw Boros spread is still the headline worth
+                showing — it is what the trade captures. */}
             {pair.netFixedApr === null && Number.isFinite(pair.grossSpreadApr) && (
               <Stat label="Gross spread">
                 <span
@@ -740,7 +719,7 @@ const OpportunityCard = memo(function OpportunityCard({
                 )
               }
             >
-              Open this strategy →
+              Open this strategy <ArrowRight size={14} aria-hidden className="inline" />
             </button>
           </div>
         </div>
@@ -899,7 +878,7 @@ function RateNote({ midApr, execApr }: { midApr: number; execApr: number | null 
   );
 }
 
-export function OpportunitiesPanel({ unconfigured = false }: { unconfigured?: boolean } = {}) {
+export function OpportunitiesPanel() {
   const [stored] = useState<StoredControls>(() => loadControls());
   const [notionalChoice, setNotionalChoice] = useState<NotionalChoice>(stored.notionalChoice);
   // Always market-at-size. The "at mark rate" alternative priced cards at a
@@ -908,7 +887,6 @@ export function OpportunitiesPanel({ unconfigured = false }: { unconfigured?: bo
   const borosEntry: BorosEntryMode = 'market';
   const [entryMode, setEntryMode] = useState<EntryMode>(stored.entryMode);
   const [exitMode, setExitMode] = useState<ExitMode>(stored.exitMode);
-  const [feeTier, setFeeTier] = useState<OpportunityFeeTier>(stored.feeTier);
   const [sizeStr, setSizeStr] = useState(String(stored.customNotionalUsd));
   // The last VALID size: a half-typed entry must never blank the list.
   const [size, setSize] = useState(stored.customNotionalUsd);
@@ -926,7 +904,6 @@ export function OpportunitiesPanel({ unconfigured = false }: { unconfigured?: bo
   const shownKeysRef = useRef<ReadonlySet<string>>(new Set());
   const flow = useTradeFlowOptional();
   const sizeId = useId();
-  const feeTierId = useId();
 
   const persist = (next: Partial<StoredControls>) =>
     writeJson(OPPORTUNITIES_STORAGE_KEY, {
@@ -935,7 +912,6 @@ export function OpportunitiesPanel({ unconfigured = false }: { unconfigured?: bo
       borosEntry,
       entryMode,
       exitMode,
-      feeTier,
       ...next,
     } satisfies StoredControls);
 
@@ -957,14 +933,11 @@ export function OpportunitiesPanel({ unconfigured = false }: { unconfigured?: bo
       : null;
   const sizeBad = notionalChoice === 'custom' && !isValidOpportunityNotional(Number(sizeStr));
 
-  // Configured accounts price from their own live fee schedule; the simulated
-  // tier only exists where there is no account to read.
   const query = useOpportunities({
     notionalUsd,
     borosEntry,
     entryMode,
     exitMode,
-    feeTier: unconfigured ? feeTier : undefined,
   });
   const data = query.data;
 
@@ -1026,11 +999,6 @@ export function OpportunitiesPanel({ unconfigured = false }: { unconfigured?: bo
   // with markets that do not exist.
   const openStrategy = useCallback(
     (pair: OpportunityPair, maturitySec: number, sizeBase?: number) => {
-      // First run: there are no keys to execute with, so opening a two-step
-      // execution wizard would dead-end. Ask for setup instead — the guide
-      // answers by flashing the API-key form, the one step between this click
-      // and a wizard that can actually trade.
-      if (unconfigured) return flow?.requestSetup();
       return flow?.openWizard({
         base: pair.base,
         borosLongVenue: pair.longLeg.venue,
@@ -1049,7 +1017,7 @@ export function OpportunitiesPanel({ unconfigured = false }: { unconfigured?: bo
         perpMode: entryMode === 'maker-hedge' ? 'maker' : 'market',
       });
     },
-    [flow, pricedNotionalUsd, entryMode, unconfigured],
+    [flow, pricedNotionalUsd, entryMode],
   );
 
   const controls = (
@@ -1118,30 +1086,6 @@ export function OpportunitiesPanel({ unconfigured = false }: { unconfigured?: bo
           </span>
         )}
       </div>
-      {unconfigured && (
-        <div className="flex flex-col items-start gap-1.5">
-          <label htmlFor={feeTierId} className={microLabelClass}>
-            Gate VIP tier
-          </label>
-          <select
-            id={feeTierId}
-            value={feeTier}
-            onChange={(e) => {
-              const next = e.target.value as OpportunityFeeTier;
-              setFeeTier(next);
-              persist({ feeTier: next });
-            }}
-            title="Perp fees assume this Gate CrossEx VIP tier."
-            className="input num h-[30px] w-24 !py-0 text-xs"
-          >
-            {OPPORTUNITY_FEE_TIERS.map((t) => (
-              <option key={t} value={t}>
-                {feeTierLabel(t)}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
       <div className="flex flex-col items-start gap-1.5">
         <div className={microLabelClass}>Perp entry</div>
         <SegmentedToggle<EntryMode>
@@ -1267,7 +1211,6 @@ export function OpportunitiesPanel({ unconfigured = false }: { unconfigured?: bo
               held={row.held}
               notionalUsd={pricedNotionalUsd}
               onOpenStrategy={flow ? openStrategy : null}
-              unconfigured={unconfigured}
             />
           ))}
         </div>
