@@ -130,14 +130,14 @@ export function usePositions(enabled = true) {
   });
 }
 
-export function useOpenOrders(symbol?: string) {
+export function useOpenOrders(symbol?: string, enabled = true) {
   const search = symbol ? `?symbol=${encodeURIComponent(symbol)}` : '';
   const shown = useTabActive();
   return useQuery({
     queryKey: [...qk.openOrders, symbol ?? ''] as const,
     queryFn: () => fetchJson<OpenOrder[]>(`/orders/open${search}`),
-    enabled: (query) => canFetch(shown, query),
-    refetchInterval: shown ? 4_000 : false,
+    enabled: (query) => enabled && canFetch(shown, query),
+    refetchInterval: shown && enabled ? 4_000 : false,
     placeholderData: keepPreviousData,
   });
 }

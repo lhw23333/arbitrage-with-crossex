@@ -507,7 +507,9 @@ const OpportunityCard = memo(function OpportunityCard({
     ? `The legs trade different assets (${pair.shortLeg.base} vs ${pair.longLeg.base}) — the pair ticket takes one base`
     : noSymbols
       ? `Neither ${prettyVenue(pair.shortLeg.venue)} nor ${prettyVenue(pair.longLeg.venue)} lists a CrossEx perp for ${pair.base}`
-      : 'Opens this strategy step by step — lock the Boros rate first, then hedge with the perps. You confirm each order yourself.';
+      : onOpenStrategy === null
+        ? '仅浏览模式：请先完成配置，再开启策略。'
+        : 'Opens this strategy step by step — lock the Boros rate first, then hedge with the perps. You confirm each order yourself.';
   const detailsDisabled =
     !canChartProfit(pair) && !canChartCapital(pair) && pair.execSpreadApr === null;
   const detailsTitle = detailsDisabled
@@ -881,7 +883,7 @@ function RateNote({ midApr, execApr }: { midApr: number; execApr: number | null 
   );
 }
 
-export function OpportunitiesPanel() {
+export function OpportunitiesPanel({ browseOnly = false }: { browseOnly?: boolean } = {}) {
   const [perpLeverage, setPerpLeverage] = useAprLeverage();
   const [stored] = useState<StoredControls>(() => loadControls());
   const [notionalChoice, setNotionalChoice] = useState<NotionalChoice>(stored.notionalChoice);
@@ -957,8 +959,9 @@ export function OpportunitiesPanel() {
    * Only with a tracked address — the landing build has neither.
    */
   const trackedAddress = useTrackedAddressOptional()?.address ?? null;
-  const exposure = usePositions(trackedAddress !== null).data?.exposure;
-  const borosMarkets = useBorosPairContext(trackedAddress).data?.markets;
+  const positions = usePositions(!browseOnly && trackedAddress !== null);
+  const exposure = browseOnly ? undefined : positions.data?.exposure;
+  const borosMarkets = useBorosPairContext(browseOnly ? null : trackedAddress).data?.markets;
   const held = useMemo(() => {
     if (!exposure) return undefined;
     const books: HeldBook[] = exposure.map((g) => ({
@@ -1225,7 +1228,7 @@ export function OpportunitiesPanel() {
               pair={row.pair}
               held={row.held}
               notionalUsd={pricedNotionalUsd}
-              onOpenStrategy={flow ? openStrategy : null}
+              onOpenStrategy={!browseOnly && flow ? openStrategy : null}
             />
           ))}
         </div>

@@ -38,6 +38,8 @@ const UserGuideModal = lazy(() =>
   import('./components/UserGuideModal').then((m) => ({ default: m.UserGuideModal })),
 );
 
+export const BROWSE_ONLY_KEY = 'crossex.browseOnly.v1';
+
 
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -45,6 +47,7 @@ export default function App() {
   const [guideOpen, setGuideOpen] = useState(false);
   const [guideSection, setGuideSection] = useState<string | undefined>(undefined);
   const openGuide = useCallback((section?: string) => {
+    setSettingsOpen(false);
     setGuideSection(section);
     setGuideOpen(true);
   }, []);
@@ -65,8 +68,10 @@ export default function App() {
   }, []);
   const credentials = useCredentials();
   const disclaimer = useDisclaimer();
-  const openOrders = useOpenOrders();
-  const positions = usePositions();
+  const [browseOnly, setBrowseOnly] = useState(() => readJson(BROWSE_ONLY_KEY, false, (v) => v === true));
+  const accountReadsEnabled = credentials.data?.configured === true && !browseOnly;
+  const openOrders = useOpenOrders(undefined, accountReadsEnabled);
+  const positions = usePositions(accountReadsEnabled);
 
   useEffect(() => {
     if (chosenTab !== null || positions.isPending) return;
@@ -82,8 +87,8 @@ export default function App() {
   useEffect(() => {
     if (setupNeeded) setIsChecklistKept(true);
   }, [setupNeeded]);
-  const showsChecklist = setupNeeded || isChecklistKept;
-  const isTrading = !credentials.isPending && !showsChecklist;
+  const showsChecklist = !browseOnly && (setupNeeded || isChecklistKept);
+  const isTrading = credentials.data?.configured === true && !credentials.isPending && !showsChecklist && !browseOnly;
   const orderCount = openOrders.data?.length ?? 0;
   const ordersBadge =
     orderCount > 0 ? (
@@ -117,8 +122,8 @@ export default function App() {
   const accountControls = (
     <>
       <UpdateIndicator />
-      {isTrading && <SetupPrompt onOpen={openSettingsAt} />}
-      <FreshnessIndicator />
+      {isTrading && <SetupPrompt onOpen={openSettingsAt} autoOpen={!guideOpen} />}
+      {isTrading && <FreshnessIndicator />}
       <ActiveWalletChip onOpen={openSettings} showWallet={isTrading} />
     </>
   );
@@ -163,6 +168,17 @@ export default function App() {
     selectTab('opportunities');
   };
 
+  const enterBrowseOnly = () => {
+    writeJson(BROWSE_ONLY_KEY, true);
+    setBrowseOnly(true);
+    selectTab('opportunities');
+  };
+  const resumeSetup = () => {
+    writeJson(BROWSE_ONLY_KEY, false);
+    setIsChecklistKept(true);
+    setBrowseOnly(false);
+  };
+
   return (
     <TradeFlowProvider>
       <RollSignalProvider>
@@ -182,7 +198,7 @@ export default function App() {
               <BrandMark />
               {/* Unconfigured, /api/account 503s forever and the strip would
                   sit on its loading skeleton — hide it until keys exist. */}
-              {!showsChecklist && (
+              {isTrading && (
                 <AccountHealthStrip>
                   {/* The borrow, on every tab: the Rebalance section lives on
                       Balances, and a trader on Positions would never learn
@@ -192,7 +208,7 @@ export default function App() {
               )}
               {/* Row 1 is the account only — status, then settings. `ml-auto`
                   when the strip is hidden so they still sit right. */}
-              <div className={`flex items-center gap-2 ${showsChecklist ? 'ml-auto' : ''}`}>
+              <div className={`flex items-center gap-2 ${!isTrading ? 'ml-auto' : ''}`}>
                 {!isTrading && guideButton}
                 {accountControls}
               </div>
@@ -223,7 +239,7 @@ export default function App() {
             {isTrading && <RollOverBanner onShowPositions={() => selectTab('positions')} />}
           </header>
 
-          {credentials.data?.configured && <RecoveryBanner onOpenTab={selectTab} />}
+          {isTrading && <RecoveryBanner onOpenTab={selectTab} />}
 
           {/* Full-width content: the order ticket is no longer a permanent
               column — the wizard and the drawer overlay on demand. */}
@@ -232,7 +248,18 @@ export default function App() {
               {credentials.isPending ? (
                 <TableSkeleton rows={6} cols={7} />
               ) : showsChecklist ? (
-                <SetupPage onFinish={finishSetup} />
+                <SetupPage onFinish={finishSetup} onBrowse={enterBrowseOnly} />
+              ) : browseOnly ? (
+                <>
+                  <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded border border-info/30 bg-info/5 p-4">
+                    <div>
+                      <h2 className="text-sm font-semibold text-ink-100">仅浏览模式</h2>
+                      <p className="mt-1 text-xs text-ink-400">可查看策略、模拟 APR 和诊断盘口。未开放下单、转账或账户操作；未配置密钥时手续费按 VIP 0 估算。</p>
+                    </div>
+                    <button type="button" className="btn" onClick={resumeSetup}>继续配置</button>
+                  </div>
+                  <OpportunitiesPanel browseOnly />
+                </>
               ) : (
                 <>
                   {/* Every panel brings its own card chrome, so the tab panels
@@ -290,19 +317,19 @@ export default function App() {
   );
 }
 
-function SetupPrompt({ onOpen }: { onOpen: (step: SetupStep) => void }) {
+function SetupPrompt({ onOpen, autoOpen = true }: { onOpen: (step: SetupStep) => void; autoOpen?: boolean }) {
   const { doneCount, firstMissing, isLoading } = useSetupState();
   const disclaimer = useDisclaimer();
   const hasChecked = useRef(false);
   const isReady = !isLoading && disclaimer.data?.accepted === true;
 
   useEffect(() => {
-    if (!isReady || hasChecked.current) return;
+    if (!isReady || !autoOpen || hasChecked.current) return;
     hasChecked.current = true;
     if (firstMissing === null || readJson(SETUP_SHOWN_KEY, false, (parsed) => parsed === true)) return;
     writeJson(SETUP_SHOWN_KEY, true);
     onOpen(firstMissing);
-  }, [isReady, firstMissing, onOpen]);
+  }, [isReady, firstMissing, onOpen, autoOpen]);
 
   if (isLoading || firstMissing === null) return null;
   return <FinishSetupPill doneCount={doneCount} onOpen={() => onOpen(firstMissing)} />;

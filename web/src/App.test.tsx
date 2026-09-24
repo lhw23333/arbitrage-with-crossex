@@ -322,7 +322,7 @@ describe('borrow pill', () => {
     await renderApp();
 
     // The header meters carry the whole margin story in one hover title.
-    const gauges = screen.getByRole('img', { name: 'Initial and maintenance margin' });
+    const gauges = await screen.findByRole('img', { name: 'Initial and maintenance margin' });
     await waitFor(() =>
       expect(gauges).toHaveAttribute(
         'title',
